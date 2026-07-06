@@ -1300,11 +1300,13 @@ export interface RlsPolicyCreatePayload {
   policy_id: string;
   policy_title: string;
   table_id: string;
+  access_level?: string;
 }
 
 export interface RlsPolicyUpdatePayload {
   policy_id: string;
   policy_title: string;
+  access_level?: string;
 }
 
 export interface RlsPolicyDeletePayload {
