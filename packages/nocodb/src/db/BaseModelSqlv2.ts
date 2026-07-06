@@ -437,9 +437,16 @@ class BaseModelSqlv2 implements IBaseModelSqlV2 {
       data.__proto__ = proto;
     }
 
-    return data
+    const result = data
       ? await nocoExecute(ast, data as ResolverObj, {}, parsedQuery)
       : null;
+
+    // Tag as read-only if visible-but-not-editable (EE-only; no-op in CE).
+    if (result && !ignoreRls) {
+      await this.applyRlsReadonlyFlags([result]);
+    }
+
+    return result;
   }
 
   public async readByPkFromModel(
@@ -1013,6 +1020,12 @@ class BaseModelSqlv2 implements IBaseModelSqlV2 {
         ignorePagination,
         validateFormula: true,
       });
+    }
+
+    // Tag visible-but-not-editable rows so the client can render them as locked
+    // (EE-only; no-op in CE). Best-effort — never blocks the read.
+    if (!ignoreRlsOpt && data?.length) {
+      await this.applyRlsReadonlyFlags(data);
     }
 
     return data?.map((d) => {
@@ -4464,8 +4477,8 @@ class BaseModelSqlv2 implements IBaseModelSqlV2 {
           true,
         );
 
-        // Resolve RLS conditions for bulkUpdateAll
-        const rlsConditionsBUA = await this.getRlsConditions();
+        // Resolve RLS conditions for bulkUpdateAll (write gate: excludes read_only rows)
+        const rlsConditionsBUA = await this.getRlsConditions('write');
         const rlsFilterGroupBUA = rlsConditionsBUA.length
           ? [new Filter({ children: rlsConditionsBUA, is_group: true })]
           : [];
@@ -9965,10 +9978,19 @@ class BaseModelSqlv2 implements IBaseModelSqlV2 {
    * Returns RLS (Row-Level Security) filter conditions for the current user.
    * CE version: no-op, returns empty array (no RLS).
    * EE version: resolves applicable policies and returns filter conditions.
+   * `mode` ('read' | 'write') is honored only by the EE override.
    */
-  public async getRlsConditions(): Promise<Filter[]> {
+  public async getRlsConditions(
+    _mode: 'read' | 'write' = 'read',
+  ): Promise<Filter[]> {
     return [];
   }
+
+  /**
+   * Tags rows the user can see but not edit with `__nc_rls_readonly`.
+   * CE version: no-op (no RLS). EE version marks read_only rows.
+   */
+  public async applyRlsReadonlyFlags(_rows: any[]): Promise<void> {}
 
   /**
    * Returns a knex where-clause callback that excludes soft-deleted records,
