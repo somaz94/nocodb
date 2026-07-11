@@ -64,22 +64,48 @@ export const relationDataFetcher = (param: {
       return data;
     }
 
-    const { ast, parsedQuery } = await getAst(context, {
-      model,
-      query,
-      extractOnlyPrimaries:
-        context.cacheMap?.get('relation_postProcessData') ?? false,
-    });
-
     if (!context.cacheMap) {
       context.cacheMap = new Map();
     }
-    // set context.cacheMap `relation_postProcessData` to ensure non-infinite loop
-    context.cacheMap.set('relation_postProcessData', true);
 
-    // nocoexecute
-    const result = await nocoExecute(ast, data, {}, parsedQuery);
-    return result;
+    // Bound the recursion via the AST layer's own depth limit instead of an
+    // ad-hoc guard.
+    //
+    // postProcessData re-resolves a relation's virtual columns (lookups) with
+    // nocoExecute, which can recurse into further relations. For a
+    // self-referential / cyclic lookup chain (A → B → A) that recursion is
+    // unbounded. The previous guard set a single `relation_postProcessData`
+    // boolean on the first relation read and never reset it, forcing every
+    // SUBSEQUENT read (siblings included — even the internal junction read trips
+    // it) to `extractOnlyPrimaries`: projected to PK + primary value only. That
+    // silently dropped every non-PV lookup target column, so a second lookup
+    // over the same relation, or a nested lookup-of-a-lookup, resolved to null
+    // (#14229) — visible only on unlicensed builds since the licensed path
+    // returns above.
+    //
+    // Thread getAst's own recursion depth (`_depth`, restored in `finally`)
+    // through the chain instead. getAst already truncates nested expansion past
+    // GET_AST_MAX_DEPTH (returning an empty ast, which terminates resolution),
+    // so every level within that limit keeps its full column set and only
+    // genuinely deep / cyclic chains stop — bounded by the same limit the rest
+    // of the read path uses, with no separate magic depth here.
+    const depth =
+      (context.cacheMap.get('relation_postProcessData_depth') as number) ?? 0;
+
+    const { ast, parsedQuery } = await getAst(context, {
+      model,
+      query,
+      _depth: depth,
+    });
+
+    context.cacheMap.set('relation_postProcessData_depth', depth + 1);
+
+    try {
+      // nocoexecute
+      return await nocoExecute(ast, data, {}, parsedQuery);
+    } finally {
+      context.cacheMap.set('relation_postProcessData_depth', depth);
+    }
   }
 
   return {
